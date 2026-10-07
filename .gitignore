@@ -1,0 +1,5 @@
+# Keep run data and local wordlists out of commits.
+*.log
+wordlists/
+results/
+.env
