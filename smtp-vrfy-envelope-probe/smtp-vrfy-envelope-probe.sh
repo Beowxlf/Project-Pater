@@ -10,6 +10,8 @@ TARGET="$1"
 DOMAIN="$2"
 WORDLIST="$3"
 PORT=25
+QUERY_TIMEOUT=20
+MAX_WORKERS=100
 
 command -v smtp-user-enum >/dev/null || {
     echo "Missing dependency: smtp-user-enum (Pentestmonkey version)" >&2
@@ -31,18 +33,29 @@ RAW="$TEMP_DIR/enumeration.log"
 FOUND="$TEMP_DIR/found-users.txt"
 trap 'rm -rf -- "$TEMP_DIR"' EXIT
 
-echo "[*] Enumerating $TARGET:$PORT with VRFY"
+echo "[*] Enumerating $TARGET:$PORT with bare VRFY names ($QUERY_TIMEOUT-second timeout, $MAX_WORKERS workers)"
 
 smtp-user-enum \
     -M VRFY \
     -U "$WORDLIST" \
-    -D "$DOMAIN" \
     -t "$TARGET" \
-    -p "$PORT" |
+    -p "$PORT" \
+    -w "$QUERY_TIMEOUT" \
+    -m "$MAX_WORKERS" |
     tee "$RAW"
 
+# Upstream builds without Kali's -w patch may ignore the timeout option.
+if ! awk -v timeout="$QUERY_TIMEOUT" -v workers="$MAX_WORKERS" '
+    $1 == "Query" && $2 == "timeout" && $4 == timeout { got_timeout = 1 }
+    $1 == "Worker" && $2 == "Processes" && $4 == workers { got_workers = 1 }
+    END { exit !(got_timeout && got_workers) }
+' "$RAW"; then
+    echo "The installed smtp-user-enum did not confirm the requested timeout and worker count." >&2
+    exit 1
+fi
+
 # Extract usernames from Pentestmonkey's documented output formats:
-#   TARGET: user@domain exists
+#   TARGET: user exists (or user@domain exists)
 #   user@TARGET: Exists
 awk -v host="$TARGET" -v domain="$DOMAIN" '
 {
@@ -92,7 +105,7 @@ read_reply() {
     local line
     REPLY_CODE=""
 
-    while IFS= read -r -t 10 line <&3; do
+    while IFS= read -r -t "$QUERY_TIMEOUT" line <&3; do
         line="${line%$'\r'}"
         printf 'S: %s\n' "$line"
 
@@ -134,13 +147,13 @@ test_user() (
         [[ "$REPLY_CODE" == 250 ]] || exit 1
     fi
 
-    send_command "MAIL FROM: <$address>" || exit 1
+    send_command "MAIL FROM:<$address>" || exit 1
     if [[ "$REPLY_CODE" != 250 ]]; then
         echo "[-] Sender rejected: $address"
         exit 1
     fi
 
-    send_command "RCPT TO: <$address>" || exit 1
+    send_command "RCPT TO:<$address>" || exit 1
     case "$REPLY_CODE" in
         250|251) ;;
         *)
@@ -165,3 +178,4 @@ while IFS= read -r user; do
         printf '[*] Continuing to next user.\n'
     fi
 done < "$FOUND"
+
